@@ -9,18 +9,37 @@ internal abstract class Program
 {
     static void Main(string[] args)
     {
-        
         var myPort = 8888;
+        if (args.Length == 1) myPort = int.Parse(args[0]);
 
+        var redis = ConnectToRedis();
         
-        ConnectionMultiplexer redis;
+        var db = redis.GetDatabase();
 
+        var server = new TcpServer("127.0.0.1", myPort);
+        server.Start();
+        server.DataReceived += (_, e) =>
+        {
+            db.StringSet(e.Client, e.Data);
+            Console.WriteLine(e.Client + " " + e.Data);
+        };
+
+        Console.ReadLine();
+
+        server.Stop();
+        redis.Close();
+        Environment.ExitCode = 0;
+    }
+
+    private static ConnectionMultiplexer ConnectToRedis()
+    {
         while (true)
         {
             try
             {
-                redis = ConnectionMultiplexer.Connect("localhost");
-                break;
+                var redis = ConnectionMultiplexer.Connect("localhost");
+                Console.WriteLine("Connected to Redis");
+                return redis;
             }
             catch (Exception e)
             {
@@ -29,26 +48,6 @@ internal abstract class Program
             }
         }
 
-        var db = redis.GetDatabase();
-        /*var sub = redis.GetSubscriber();
-        
-        sub.Subscribe("data", (channel, message) =>
-        {
-            Console.WriteLine("Received: " + message);
-        });*/
-
-        var server = new TcpServer("127.0.0.1", myPort);
-        server.Start();
-        server.DataReceived += (_, e) =>
-        {
-            db.StringSet(e.Client, e.Data);
-            Console.WriteLine(e.Client + " " + e.Data);
-            /*
-            sub.Publish("data", e.Data);
-        */
-            
-        };
-        Console.ReadLine();
     }
 }
 

@@ -1,14 +1,23 @@
 version: '3.9'
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - web
+
+  node1:
+    build: .
     image: myapp:latest
-    container_name: myapp
-    tty: true
-    stdin_open: true
-    volumes:
-      - .:/app
+    container_name: node1
     ports:
       - "8888:8888"
+    networks:
+      - web
+    depends_on: 
+      - redis
+
+networks:
+  web:
+    driver: bridge
