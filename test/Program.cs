@@ -1,36 +1,30 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
 namespace test;
 
 internal abstract class Program
 {
-    static void Main(string[] args)
+    static async Task Main(string[] args)
     {
         var myPort = 8888;
         if (args.Length == 1) myPort = int.Parse(args[0]);
 
+        var loggerFactory = LoggerFactory.Create(builder => { builder.AddConsole(); });
+        var logger = loggerFactory.CreateLogger<TcpServer>();
+        
         var redis = ConnectToRedis();
         
         var db = redis.GetDatabase();
-
-        var server = new TcpServer("127.0.0.1", myPort);
-        server.Start();
-        server.DataReceived += (_, e) =>
-        {
-            db.StringSet(e.Client, e.Data);
-            Console.WriteLine(e.Client + " " + e.Data);
-        };
-
-        Console.ReadLine();
-
-        server.Stop();
-        redis.Close();
+        
+        var server = new TcpServer(redis,db,logger);
+        await server.ListenAsync(IPAddress.Parse("127.0.0.1"), myPort);
+        await redis.CloseAsync();
         Environment.ExitCode = 0;
     }
-
     private static ConnectionMultiplexer ConnectToRedis()
     {
         while (true)
@@ -51,97 +45,76 @@ internal abstract class Program
     }
 }
 
-class TcpServer
+public class TcpServer
 {
-    private readonly string _ip;
-    private readonly int _port;
-    private TcpListener _listener;
-    private bool _running;
+    private readonly ILogger<TcpServer> _logger;
+    private readonly ConnectionMultiplexer _redisConnection;
+    private readonly IDatabase _redisDatabase;
 
-    public TcpServer(string ip, int port)
+    public TcpServer(ConnectionMultiplexer redisConnection, IDatabase redisDatabase, ILogger<TcpServer> logger)
     {
-        _ip = ip;
-        _port = port;
+        _redisConnection = redisConnection ?? throw new ArgumentNullException(nameof(redisConnection));
+        _redisDatabase = redisDatabase ?? throw new ArgumentNullException(nameof(redisDatabase));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public void Start()
+    public async Task ListenAsync(IPAddress address, int port, CancellationToken cancellationToken = default)
     {
-        _listener = new TcpListener(IPAddress.Parse(_ip), _port);
-        _listener.Start();
-        _running = true;
-        AcceptClients();
-    }
+        var listener = new TcpListener(address, port);
+        listener.Start();
 
-    public void Stop()
-    {
-        _running = false;
-        _listener.Stop();
-    }
-
-    private async void AcceptClients()
-    {
-        while (_running)
+        while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                var client = await _listener.AcceptTcpClientAsync();
-                await Task.Run(() => ProcessClient(client));
+                var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                _ = HandleClientAsync(client, cancellationToken);
             }
-            catch (Exception e)
+            catch (OperationCanceledException)
             {
-                Console.WriteLine(e.Message);
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error accepting client connection");
             }
         }
+
+        listener.Stop();
     }
 
-    private async void ProcessClient(TcpClient client)
+    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
     {
+        var remoteIpEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
+        var clientName = $"{remoteIpEndPoint?.Address}:{remoteIpEndPoint?.Port}";
+
         try
         {
-            var remoteIpEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
-            var clientName = $"{remoteIpEndPoint?.Address}:{remoteIpEndPoint?.Port}";
-            Console.WriteLine("Client connected: {0}", clientName);
             await using var stream = client.GetStream();
+            Console.WriteLine("Client connected: {0}", clientName);
 
             var buffer = new byte[1024];
             while (true)
             {
+                var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
+                    .ConfigureAwait(false);
+                var clientChoice = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                var data = await stream.ReadAsync(buffer, 0, buffer.Length);
-                var clientChoice = Encoding.UTF8.GetString(buffer, 0, data);
-
-                if (clientChoice is "q") break;
-
-                DataReceived?.Invoke(this, new DataReceivedEventArgs(clientName, clientChoice));
+                var choices = new[] { "rock", "paper", "scissors" };
+                var random = new Random();
+                var serverChoice = choices[random.Next(choices.Length)];
+                var result = GetGameResult(clientChoice, serverChoice);
+                await _redisDatabase.StringGetSetAsync(clientName, clientChoice).ConfigureAwait(false);
                 
-                string[] choices = new string[] { "rock", "paper", "scissors" };
-                Random random = new Random();
-                string serverChoice = choices[random.Next(choices.Length)];
+                //var response = await _redisDatabase.StringGetAsync(serverChoice).ConfigureAwait(false);
+                //var responseData = Encoding.UTF8.GetBytes(response);
+                //var message = $"{result},{serverChoice},{responseData}";
 
-                string result;
-                if (clientChoice == serverChoice)
-                {
-                    result = "tie";
-                }
-                else if ((clientChoice == "rock" && serverChoice == "scissors") ||
-                         (clientChoice == "paper" && serverChoice == "rock") ||
-                         (clientChoice == "scissors" && serverChoice == "paper"))
-                {
-                    result = "win";
-                }
-                else
-                {
-                    result = "lose";
-                }
+                var message = $"{result},{serverChoice}";
 
-                // Send result and server's choice
-                string message = $"{result},{serverChoice}";
-                byte[] messageBytes = Encoding.UTF8.GetBytes(message);
-                stream.Write(messageBytes, 0, messageBytes.Length);
+                var messageBytes = Encoding.UTF8.GetBytes(message);
+                await stream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken).ConfigureAwait(false);
             }
-
-            Console.WriteLine("Client disconnected: {0}", clientName);
-            client.Close();
         }
         catch (Exception e)
         {
@@ -150,20 +123,21 @@ class TcpServer
         finally
         {
             client.Close();
+            Console.WriteLine("Client disconnected: {0}", clientName);
         }
     }
 
-    public event EventHandler<DataReceivedEventArgs> DataReceived;
-}
-
-internal class DataReceivedEventArgs : EventArgs
-{
-    public DataReceivedEventArgs(string client, string data)
+    private static string GetGameResult(string clientChoice, string serverChoice)
     {
-        Data = data;
-        Client = client;
-    }
+        if (clientChoice == serverChoice) return "tie";
 
-    public string Client { get; }
-    public string Data { get; }
+        if ((clientChoice == "rock" && serverChoice == "scissors") ||
+            (clientChoice == "paper" && serverChoice == "rock") ||
+            (clientChoice == "scissors" && serverChoice == "paper"))
+        {
+            return "win";
+        }
+
+        return "lose";
+    }
 }
