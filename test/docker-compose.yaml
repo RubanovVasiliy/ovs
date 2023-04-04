@@ -1,0 +1,14 @@
+version: '3.9'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: myapp:latest
+    container_name: myapp
+    tty: true
+    stdin_open: true
+    volumes:
+      - .:/app
+    ports:
+      - "8888:8888"
