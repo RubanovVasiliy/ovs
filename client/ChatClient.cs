@@ -1,84 +1,107 @@
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-namespace client;
-
-internal class ChatClient
+namespace test_client
 {
-    private readonly List<string> _servers;
-    private int _currentServerIndex;
-    private TcpClient _client;
-    private NetworkStream _stream;
-    private bool _isConnected;
-
-    public ChatClient()
+    internal class ChatClient
     {
-        _servers = new List<string>
-        {
-            "0.0.0.0",
-            "server2.com",
-            "server3.com"
-        };
-        _currentServerIndex = 0;
-        _isConnected = false;
-    }
+        private readonly List<int> _servers;
+        private int _currentServerIndex;
+        private TcpClient _client;
+        private NetworkStream _stream;
+        private bool _isConnected;
+        private readonly int _port;
 
-    private void Connect()
-    {
-        string currentServer = _servers[_currentServerIndex];
-        try
+        public ChatClient(int port)
         {
-            _client = new TcpClient(currentServer, 8888);
-            _stream = _client.GetStream();
-            _isConnected = true;
-            Console.WriteLine("Connected to {0}", currentServer);
+            _servers = new List<int>
+            {
+                8888,
+                2222
+            };
+            _currentServerIndex = 0;
+            _isConnected = false;
+            _port = port;
         }
-        catch (SocketException ex)
-        {
-            Console.WriteLine("Connection error: {0}", ex.Message);
-            Reconnect();
-        }
-    }
 
-    private void Disconnect()
-    {
-        if (_client != null)
+        private async void Connect()
+        {
+            var currentServer = _servers[_currentServerIndex];
+            try
+            {
+                var ipAddress = Dns.GetHostEntry(Dns.GetHostName()).AddressList[0];
+                var ipLocalEndPoint = new IPEndPoint(ipAddress, _port);
+
+                _client = new TcpClient(ipLocalEndPoint);
+                await _client.ConnectAsync("127.0.0.1", currentServer);
+                await using var _stream = _client.GetStream();
+                _isConnected = true;
+                Console.WriteLine("Connected to {0}", currentServer);
+            }
+            catch (SocketException ex)
+            {
+                Console.WriteLine("Connection error: {0}", ex.Message);
+                Thread.Sleep(100);
+                Reconnect();
+            }
+        }
+
+        private void Disconnect()
         {
             _client.Close();
             _stream = null;
             _isConnected = false;
             Console.WriteLine("Disconnected");
         }
-    }
 
-    private void Reconnect()
-    {
-        _currentServerIndex++;
-        if (_currentServerIndex >= _servers.Count)
+        private void Reconnect()
         {
-            _currentServerIndex = 0;
-        }
-
-        Disconnect();
-        Connect();
-    }
-
-    public void SendMessage(string message)
-    {
-        if (!_isConnected)
-        {
+            _currentServerIndex++;
+            _currentServerIndex %= _servers.Count;
+            Disconnect();
             Connect();
         }
 
-        byte[] data = Encoding.UTF8.GetBytes(message);
-        try
+        public void SendMessage()
         {
-            _stream.Write(data, 0, data.Length);
-        }
-        catch (SocketException ex)
-        {
-            Console.WriteLine("Error sending message: {0}", ex.Message);
-            Reconnect();
+            if (!_isConnected)
+            {
+                Connect();
+            }
+
+            while (true)
+            {
+                try
+                {
+                    Console.WriteLine("Enter your choice (rock, paper, scissors) or q for exit:");
+                    var choice = Console.ReadLine();
+                    if (choice is "q")
+                    {
+                        break;
+                    }
+                    if (choice is not ("rock" or "paper" or "scissors"))
+                    {
+                        Console.WriteLine("Invalid choice. Please try again.");
+                        continue;
+                    }
+
+                    var buffer = Encoding.UTF8.GetBytes(choice);
+                    _stream.Write(buffer, 0, buffer.Length);
+
+                    buffer = new byte[1024];
+                    var bytesRead = _stream.Read(buffer, 0, buffer.Length);
+                    var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"Result: {message}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error sending message: {0}", ex.Message);
+                    Reconnect();
+                }
+            }
+
+            Disconnect();
         }
     }
 }

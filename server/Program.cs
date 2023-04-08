@@ -1,134 +1,177 @@
-﻿namespace server;
-
-using System;
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
+namespace test;
 
-    class Program
+internal abstract class Program
+{
+    static async Task Main(string[] args)
     {
-        static async Task Main(string[] args)
-        {
-            TcpListener listener = new TcpListener(IPAddress.Any, 12345);
-            listener.Start();
+        var myPort = 8888;
+        if (args.Length == 1) myPort = int.Parse(args[0]);
 
-            Console.WriteLine("Server started");
+        var loggerFactory = LoggerFactory.Create(builder => { builder.AddConsole(); });
+        var logger = loggerFactory.CreateLogger<TcpServer>();
+        var server = new TcpServer(logger);
+        await server.ListenAsync(IPAddress.Parse("127.0.0.1"), myPort);
+        Environment.ExitCode = 0;
+    }
+}
 
-            while (true)
-            {
-                TcpClient client = await listener.AcceptTcpClientAsync();
-                Console.WriteLine("Client connected");
+public class TcpServer
+{
+    private readonly ILogger<TcpServer> _logger;
 
-                Task.Run(() => HandleClient(client));
-            }
-        }
 
-        static void HandleClient(TcpClient client)
+    public TcpServer( ILogger<TcpServer> logger)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    public async Task ListenAsync(IPAddress address, int port, CancellationToken cancellationToken = default)
+    {
+        var listener = new TcpListener(address, port);
+        listener.Start();
+        _logger.LogInformation("Server started on PORT: {Port}", port);
+
+        while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                NetworkStream stream = client.GetStream();
+                var client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
+                _ = HandleClientAsync(client, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error accepting client connection");
+            }
+        }
 
-                string[] choices = new string[] { "rock", "paper", "scissors" };
-                Random random = new Random();
-                string serverChoice = choices[random.Next(choices.Length)];
+        listener.Stop();
+    }
 
-                byte[] buffer = new byte[1024];
-                int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                string clientChoice = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    {
+        var remoteIpEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
+        var clientName = $"{remoteIpEndPoint?.Address}:{remoteIpEndPoint?.Port}";
 
-                string result;
-                if (clientChoice == serverChoice)
+        try
+        {
+            await using var stream = client.GetStream();
+            Console.WriteLine("Client connected: {0}", clientName);
+
+            var buffer = new byte[1024];
+            while (true)
+            {
+                var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
+                    .ConfigureAwait(false);
+                var clientData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                var res = clientData.Split(',');
+                var id = res[0];
+                var clientChoice = res[1];
+
+                var choices = new[] { "rock", "paper", "scissors" };
+                var random = new Random();
+                var serverChoice = choices[random.Next(choices.Length)];
+                var result = GetGameResult(clientChoice, serverChoice);
+                string score;
+
+                const string fileName = "data/results.bin";
+                var filePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
+                var fileContent = File.ReadAllText(filePath);
+
+                var strings = fileContent.Split('\n');
+                var resInFile = "";
+
+                foreach (var str in strings)
+                    if (str.Contains($"id:{id}"))
+                        resInFile = str;
+
+                if (!resInFile.Equals(""))
                 {
-                    result = "tie";
-                }
-                else if ((clientChoice == "rock" && serverChoice == "scissors") ||
-                         (clientChoice == "paper" && serverChoice == "rock") ||
-                         (clientChoice == "scissors" && serverChoice == "paper"))
-                {
-                    result = "win";
+                    var blocks = resInFile.Split(':');
+                    var value = blocks[2];
+                    value = SetScore(value, result);
+                    fileContent = fileContent.Replace(resInFile, $"id:{id}:{value}");
+                    File.WriteAllText(filePath, fileContent);
+                    score = value;
                 }
                 else
                 {
-                    result = "lose";
+                    var value = SetScore("0,0,0", result);
+                    await using (var writer = new StreamWriter(filePath, true))
+                        await writer.WriteLineAsync($"id:{id}:{value}");
+                    
+                    score = value;
                 }
-
-                // Send result and server's choice
-                string message = $"{result},{serverChoice}";
-                byte[] messageBytes = Encoding.UTF8.GetBytes(message);
-                stream.Write(messageBytes, 0, messageBytes.Length);
-                
-                client.Close();
+                Console.WriteLine(GetLogAboutUser(id, clientChoice, score));
+                var message = $"{result},{serverChoice}";
+                var messageBytes = Encoding.UTF8.GetBytes(message);
+                await stream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception e)
-            {
-                Console.WriteLine(e.Message);
-            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e.Message);
+        }
+        finally
+        {
+            client.Close();
+            Console.WriteLine("Client disconnected: {0}", clientName);
         }
     }
 
-
-
-/*
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-
-IPAddress server1Address = IPAddress.Parse("192.168.0.1");
-int server1Port = 8888;
-
-// Создаем новый сокет для прослушивания входящих соединений на сервере 1
-Socket listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-listener.Bind(new IPEndPoint(server1Address, server1Port));
-listener.Listen(100);
-
-// Принимаем входящие соединения и запускаем новый поток для каждого клиента
-while (true)
-{
-    Socket client = listener.Accept();
-    Thread clientThread = new Thread(() => HandleClient(client));
-    clientThread.Start();
-}
-
-// Обработка клиентского соединения
-void HandleClient(Socket client)
-{
-    try
+    private static string GetGameResult(string clientChoice, string serverChoice)
     {
-        // Получаем данные от клиента
-        byte[] buffer = new byte[1024];
-        int bytesRead = client.Receive(buffer);
-        string data = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+        if (clientChoice == serverChoice) return "tie";
 
-        // Сохраняем данные в базу данных или отправляем на другие сервера кластера
-        SaveData(data);
+        if ((clientChoice == "rock" && serverChoice == "scissors") ||
+            (clientChoice == "paper" && serverChoice == "rock") ||
+            (clientChoice == "scissors" && serverChoice == "paper"))
+        {
+            return "win";
+        }
 
-        // Отправляем клиенту данные из базы данных или других серверов кластера
-        string response = GetData();
-        byte[] responseBytes = Encoding.UTF8.GetBytes(response);
-        client.Send(responseBytes);
+        return "lose";
     }
-    catch (Exception ex)
+
+    private static string SetScore(string score, string result)
     {
-        Console.WriteLine(ex.Message);
+        var results = score.Split(',');
+        var wins = int.Parse(results[0]);
+        var loses = int.Parse(results[1]);
+        var ties = int.Parse(results[2]);
+
+        switch (result)
+        {
+            case "win":
+                wins++;
+                break;
+            case "lose":
+                loses++;
+                break;
+            case "tie":
+                ties++;
+                break;
+        }
+
+        return $"{wins},{loses},{ties}";
     }
-    finally
+
+    private static string GetLogAboutUser(string id, string choice, string score)
     {
-        client.Shutdown(SocketShutdown.Both);
-        client.Close();
+        var results = score.Split(',');
+        var wins = int.Parse(results[0]);
+        var loses = int.Parse(results[1]);
+        var ties = int.Parse(results[2]);
+
+        return $"Client id: {id} client choice: {choice} Wins: {wins} Loses: {loses} Ties: {ties}";
     }
 }
-
-// Сохранение данных в базу данных или отправка на другие сервера кластера
-void SaveData(string data)
-{
-    // Реализация механизма репликации данных между серверами кластера
-}
-
-// Получение данных из базы данных или других серверов кластера
-string GetData()
-{
-// Реализ
-}*/
