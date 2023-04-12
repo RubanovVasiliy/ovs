@@ -14,7 +14,7 @@ internal abstract class Program
 
         var loggerFactory = LoggerFactory.Create(builder => { builder.AddConsole(); });
         var logger = loggerFactory.CreateLogger<TcpServer>();
-        var server = new TcpServer(logger);
+        var server = new TcpServer(logger, myPort);
         await server.ListenAsync(IPAddress.Parse("127.0.0.1"), myPort);
         Environment.ExitCode = 0;
     }
@@ -23,11 +23,15 @@ internal abstract class Program
 public class TcpServer
 {
     private readonly ILogger<TcpServer> _logger;
+    private readonly List<string> _serversPorts = new List<string>() { "2222", "8888" };
 
+    private readonly string _port;
 
-    public TcpServer( ILogger<TcpServer> logger)
+    public TcpServer(ILogger<TcpServer> logger, int port)
     {
+        _port = port.ToString();
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _serversPorts.Remove(port.ToString());
     }
 
     public async Task ListenAsync(IPAddress address, int port, CancellationToken cancellationToken = default)
@@ -61,6 +65,8 @@ public class TcpServer
         var remoteIpEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
         var clientName = $"{remoteIpEndPoint?.Address}:{remoteIpEndPoint?.Port}";
 
+        const string fileName = "data/results.bin";
+
         try
         {
             await using var stream = client.GetStream();
@@ -69,8 +75,19 @@ public class TcpServer
             var buffer = new byte[1024];
             while (true)
             {
+                if (_serversPorts.Contains(remoteIpEndPoint?.Port.ToString()))
+                {
+                    var bytesRead1 = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
+                        .ConfigureAwait(false);
+                    var serverData = Encoding.UTF8.GetString(buffer, 0, bytesRead1);
+                    var filePathS = Path.Combine(Directory.GetCurrentDirectory(), fileName);
+
+                    await using (var writer = new StreamWriter(filePathS))
+                        await writer.WriteAsync(serverData);
+                }
+
                 var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
-                    .ConfigureAwait(false);
+                        .ConfigureAwait(false);
                 var clientData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
                 var res = clientData.Split(',');
@@ -83,7 +100,6 @@ public class TcpServer
                 var result = GetGameResult(clientChoice, serverChoice);
                 string score;
 
-                const string fileName = "data/results.bin";
                 var filePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
                 var fileContent = File.ReadAllText(filePath);
 
@@ -108,13 +124,15 @@ public class TcpServer
                     var value = SetScore("0,0,0", result);
                     await using (var writer = new StreamWriter(filePath, true))
                         await writer.WriteLineAsync($"id:{id}:{value}");
-                    
+
                     score = value;
                 }
                 Console.WriteLine(GetLogAboutUser(id, clientChoice, score));
                 var message = $"{result},{serverChoice}";
                 var messageBytes = Encoding.UTF8.GetBytes(message);
                 await stream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken).ConfigureAwait(false);
+
+                ServerConnector.SendToServers(_serversPorts);
             }
         }
         catch (Exception e)
