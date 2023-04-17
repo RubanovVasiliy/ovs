@@ -70,11 +70,12 @@ class ChatClient:
                     data = self.client.recv(1024)
 
                 message = data.decode()
-                blocks = message.split(',')
-                result = blocks[0]
-                serverChoice = blocks[1]
+                print(message)
+                #blocks = message.split(',')
+                #result = blocks[0]
+                #serverChoice = blocks[1]
 
-                print(f'Result: {result}\nServer choice: {serverChoice}\n')
+                #print(f'Result: {result}\nServer choice: {serverChoice}\n')
             except socket.error as ex:
                 # print(f'Error sending message: {ex}')
                 self.reconnect()

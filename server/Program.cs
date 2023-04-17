@@ -23,7 +23,7 @@ internal abstract class Program
 public class TcpServer
 {
     private readonly ILogger<TcpServer> _logger;
-    private readonly List<string> _serversPorts = new List<string>() { "2222", "8888" };
+    private readonly List<string> _serversPorts = new() { "2222", "8888" };
 
     private readonly string _port;
 
@@ -64,8 +64,8 @@ public class TcpServer
     {
         var remoteIpEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
         var clientName = $"{remoteIpEndPoint?.Address}:{remoteIpEndPoint?.Port}";
-
-        const string fileName = "data/results.bin";
+        var fileName = "data/" + _port + ".bin";
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
 
         try
         {
@@ -75,75 +75,85 @@ public class TcpServer
             var buffer = new byte[1024];
             while (true)
             {
-                if (_serversPorts.Contains(remoteIpEndPoint?.Port.ToString()))
-                {
-                    var bytesRead1 = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
-                        .ConfigureAwait(false);
-                    var serverData = Encoding.UTF8.GetString(buffer, 0, bytesRead1);
-                    var filePathS = Path.Combine(Directory.GetCurrentDirectory(), fileName);
-
-                    await using (var writer = new StreamWriter(filePathS))
-                        await writer.WriteAsync(serverData);
-                }
-
                 var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
-                        .ConfigureAwait(false);
-                var clientData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    .ConfigureAwait(false);
+                var data = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                var res = clientData.Split(',');
+                if (data.Contains("log"))
+                {
+                    data = string.Join(':', data.Split(':').Skip(1));
+                    await using var writer = new StreamWriter(filePath);
+                    await writer.WriteAsync(data);
+                    Console.WriteLine("Client disconnected: {0}", clientName);
+                    break;
+                }
+                
+                var res = data.Split(',');
                 var id = res[0];
                 var clientChoice = res[1];
 
-                var choices = new[] { "rock", "paper", "scissors" };
-                var random = new Random();
-                var serverChoice = choices[random.Next(choices.Length)];
+                var serverChoice = GetServerChoice();
                 var result = GetGameResult(clientChoice, serverChoice);
-                string score;
+                var score = await ReadScoreFromFile(filePath, id, result);
 
-                var filePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
-                var fileContent = File.ReadAllText(filePath);
-
-                var strings = fileContent.Split('\n');
-                var resInFile = "";
-
-                foreach (var str in strings)
-                    if (str.Contains($"id:{id}"))
-                        resInFile = str;
-
-                if (!resInFile.Equals(""))
-                {
-                    var blocks = resInFile.Split(':');
-                    var value = blocks[2];
-                    value = SetScore(value, result);
-                    fileContent = fileContent.Replace(resInFile, $"id:{id}:{value}");
-                    File.WriteAllText(filePath, fileContent);
-                    score = value;
-                }
-                else
-                {
-                    var value = SetScore("0,0,0", result);
-                    await using (var writer = new StreamWriter(filePath, true))
-                        await writer.WriteLineAsync($"id:{id}:{value}");
-
-                    score = value;
-                }
                 Console.WriteLine(GetLogAboutUser(id, clientChoice, score));
                 var message = $"{result},{serverChoice}";
                 var messageBytes = Encoding.UTF8.GetBytes(message);
                 await stream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken).ConfigureAwait(false);
 
-                ServerConnector.SendToServers(_serversPorts);
+                ServerConnector.SendToServers(_serversPorts, _port);
             }
+
+            client.Close();
         }
         catch (Exception e)
         {
-            //Console.WriteLine(e.Message);
-        }
-        finally
-        {
+            Console.WriteLine(e.Message);
             client.Close();
             Console.WriteLine("Client disconnected: {0}", clientName);
         }
+    }
+
+    private static async Task<string> ReadScoreFromFile(string filePath, string id, string result)
+    {
+        var fileContent = File.ReadAllText(filePath);
+
+        var strings = fileContent.Split('\n');
+        var resInFile = "";
+
+        foreach (var str in strings)
+        {
+            if (!str.Contains($"id:{id}")) continue;
+            resInFile = str;
+            break;
+        }
+
+        string score;
+        if (!resInFile.Equals(""))
+        {
+            var blocks = resInFile.Split(':');
+            var value = blocks[2];
+            value = SetScore(value, result);
+            fileContent = fileContent.Replace(resInFile, $"id:{id}:{value}");
+            File.WriteAllText(filePath, fileContent);
+            score = value;
+        }
+        else
+        {
+            var value = SetScore("0,0,0", result);
+            await using (var writer = new StreamWriter(filePath, true))
+                await writer.WriteLineAsync($"id:{id}:{value}");
+            score = value;
+        }
+
+        return score;
+    }
+
+    private static string GetServerChoice()
+    {
+        var choices = new[] { "rock", "paper", "scissors" };
+        var random = new Random();
+        return choices[random.Next(choices.Length)];
     }
 
     private static string GetGameResult(string clientChoice, string serverChoice)
